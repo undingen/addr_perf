@@ -39,6 +39,18 @@ I wrote a small example which helped me confirm it:
 Investigation via 'perf record' shows a huge difference in `branch-misses` but also `L1-icache-loads`, `iTLB-load-misses`, `iTLB-loads` on
 some CPUs which report this counts.
 
+## Intel® 64 and IA-32 Architectures Optimization Reference Manual
+Intels optimizations guides contains an entry for this under a section for earlier intel atom CPUs:
+
+>F.8.1.3 Branching Across 4GB Boundary
+>>Another important performance consideration from a front end standpoint is branch prediction. For
+>>64-bit applications, branch prediction performance can be negatively impacted when the target of a
+>>branch is more than 4GB away from the branch. This is more likely to happen when the application is split
+>>into shared libraries. Newer glibc versions can put the shared libraries into the first 2GB to avoid this
+>>problem (since 2.23). The environment variable LD_PREFER_MAP_32BIT_EXEC=1 has to be set.
+>>Developers can build statically to improve the locality in their code. Building with LTO should further
+>>improve performance.
+
 ## Intel i9-12900K - Alder Lake (running on the performance cores)
        calls jit func makes: 5000
        addr of helper_func0:   0x5601480697f0
