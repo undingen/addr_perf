@@ -1,7 +1,7 @@
 # Performance difference of virtual memory addresses
 # TLDR:
 For optimal perf make sure (JIT) compiled code gets placed close to code of other  (e.g. C compiled) functions it calls.
-Where close on amd64 likely means less than 2/4GB difference in addresses.
+Where close on amd64 likely means less than 2/4GB difference in addresses (on ARM more likely close to 128MB).
 It seems usage of relative or absolute call instructions can also make some difference on some cpu designs.
 
 # Longer text:
@@ -10,7 +10,7 @@ It seems like the address difference between two functions is the cause.
 On my Intel Alder Lake it seems if the address difference is 2/4GB it will be fast else slow.
 
 I could reproduce this behaviour on the intel cpu but also on 3 different ARM64 cpus (Graviton2, RPi4, M1 Pro)
-but the the bahaviour is everywhere a bit different. And the number of times the JIT calls the helper_funcs
+but the behaviour is everywhere a bit different. And the number of times the JIT calls the helper_funcs
 seems to make a huge difference.
 
 I wrote a small example which helped me confirm it:
@@ -21,10 +21,9 @@ I wrote a small example which helped me confirm it:
   1. amd64: `call rdi`
   2. arm64: `blr x0`
 * all the JIT funcs called 'rel_*' use a IP relative call instruction:
-   amd64: `call <helper_func>` can only address +-2GB
-   arm64: `bl <helper_func>`   can only address +-128MB
+  1. amd64: `call <helper_func>` can only address +-2GB
+  2. arm64: `bl <helper_func>`   can only address +-128MB
 * I over aligned all the code to make sure I'm not just measuring some alignment issues
-* ARM64 version uses exact same number of instructions for rel and abs versions.
 * Test programs runs all version twice to confirm perf difference stays the same between runs.
 * 'jit code addr' is the addr the code got compiled to
 * 'addr of helper_func0' is the addr of the C function which get's called from the JIT code
@@ -141,7 +140,6 @@ Intels optimizations guides contains an entry for this under a section for earli
                      rel_near    0xaaaac2ca0000                   14 1315us
 
 
-perf record:
                    branch-misses    L1-icache-loads   L1-icache-load-misses
        abs_1G:     200.400.435      4.704.634.583     100.969.622
        abs_near:   180.973.425      4.314.797.705     101.030.718
