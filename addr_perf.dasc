@@ -1,0 +1,231 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <time.h>
+
+#include "LuaJIT/dynasm/dasm_proto.h"
+
+// disable this on x86
+
+
+#if __aarch64__
+#include "LuaJIT/dynasm/dasm_arm64.h"
+#else
+#include "LuaJIT/dynasm/dasm_x86.h"
+
+#endif
+
+|.if aarch64
+    |.arch arm64
+|.else
+    |.arch x64
+|.endif
+
+long int NUM_CALLS=5000;
+
+typedef long (*FuncJitTy)(long);
+typedef long (*FuncHelperTy)(void*);
+#define HELPER(n) __attribute__((optimize("-O0"))) long helper_func ## n(void* p) { if (p != &helper_func ## n) abort(); return n; }
+
+HELPER(0)
+HELPER(1)
+HELPER(2)
+HELPER(3)
+HELPER(4)
+HELPER(5)
+HELPER(6)
+HELPER(7)
+HELPER(8)
+HELPER(9)
+
+#undef HELPER
+#define HELPER(n) &helper_func ## n
+
+FuncHelperTy helper_funcs[20] = {
+    HELPER(0),
+    HELPER(1),
+    HELPER(2),
+    HELPER(3),
+    HELPER(4),
+    HELPER(5),
+    HELPER(6),
+    HELPER(7),
+    HELPER(8),
+    HELPER(9),
+};
+
+
+
+long CODE_SIZE = 0;
+
+FuncJitTy jit_func(int rel_call, void* addr_hint) {
+    dasm_State* d;
+    dasm_State** Dst = &d;
+    |.section code
+    dasm_init(&d, DASM_MAXSECTION);
+    |.globals lbl_
+    void* labels[lbl__MAX];
+    dasm_setupglobal(&d, labels, lbl__MAX);
+    |.actionlist bf_actions
+    dasm_setup(&d, bf_actions);
+    |.code
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////
+
+|.if aarch64
+#if __aarch64__
+    | stp     x29, x30, [sp, #-16]!
+    | mov     x29, sp
+    for (int i=0; i<NUM_CALLS; ++i) {
+        |.align 32
+        // rotate throught the call helper funcs to make it a bit more realistic
+        unsigned long val = (unsigned long)helper_funcs[9-(i%10)];
+
+        // we always mov the address of the helper into a register even though bl ignores it
+        // this makes sure we teh cpu has to execute the same number of instruction and all calls are aligned
+        // the same and we are not seeing just some limit of how many calls in a cache line the branch predictor
+        // can handle.
+        // x0 is also the first argument of a function on arm64
+        | movz x0, #(val >>  0) & 0xFFFF
+        | movk x0, #(val >> 16) & 0xFFFF, lsl #16
+        | movk x0, #(val >> 32) & 0xFFFF, lsl #32
+        | movk x0, #(val >> 48) & 0xFFFF, lsl #48
+        if (rel_call) {
+            | bl &val
+        } else {
+            | blr x0
+        }
+    }
+    |.align 32
+    | ldp     x29, x30, [sp], #16             // 16-byte Folded Reload
+    | ret
+#endif
+|.else
+#if __amd64__
+    | sub     rsp, 8
+    for (int i=0; i<NUM_CALLS; ++i) {
+        unsigned long val = (unsigned long)helper_funcs[9-(i%10)];
+        |.align 32
+        | mov64 rdi, val
+        if (rel_call) {
+            | call &val
+        } else {
+            | call rdi
+        }
+    }
+    |.align 32
+    | add     rsp, 8
+    | ret
+#endif
+|.endif
+    ///////////////////////////////////////////////////////////////////////////////////////////////
+
+    size_t sz;
+    dasm_link(&d, &sz);
+    if (!CODE_SIZE) {
+        CODE_SIZE = sz;
+        printf("jit code size: %ld\n", CODE_SIZE);
+    } else if (CODE_SIZE != sz) { /* check that all jit paths generate exact same number of instructions */
+        printf("code size differend %ld %ld\n", CODE_SIZE, sz);
+        abort();
+    }
+    void *buf = mmap(addr_hint, sz, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (addr_hint && buf != addr_hint)
+        return 0;
+    dasm_encode(&d, buf);
+    __builtin___clear_cache((char*)buf, &((char*)buf)[sz]);
+
+    dasm_free(&d);
+    return (FuncJitTy)buf;
+}
+
+void bench(const char* name, FuncJitTy f) {
+    if (!f) {
+        printf("%s failed\n", name);
+        abort();
+        return;
+    }
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (int i=0; i<100000000/NUM_CALLS; ++i) {
+        f(i);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    printf("%25s %20p %20ld %ldus\n", name, f, labs((long)f-(long)helper_func0)/1024/1024, (1000000 * (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1000)/1000);
+}
+
+int main(int argc, char** argv) {
+    unsigned long near1 = ((unsigned long)&helper_func0 + 10*1024*1024) & ~0xFFFF;
+    unsigned long near2 = ((unsigned long)&helper_func0 + 15*1024*1024) & ~0xFFFF;
+
+    unsigned long far = ((unsigned long)&helper_func0 + 1024*1024*1024) & ~0xFFFF;
+#if __amd64__
+    unsigned long outside1 = ((unsigned long)&helper_func0 + 2l*1024*1024*1024 + 65*1024*1024) & ~0xFFFF;
+#else
+    unsigned long outside1 = ((unsigned long)&helper_func0 + 150*1024*1024) & ~0xFFFF;
+    unsigned long outside2 = ((unsigned long)&helper_func0 + 300*1024*1024) & ~0xFFFF;
+    unsigned long outside3 = ((unsigned long)&helper_func0 + 600*1024*1024) & ~0xFFFF;
+#endif
+
+    const char* only_name = 0;
+    if (argc > 1)
+        NUM_CALLS = atol(argv[1]);
+
+    if (argc > 2 && strlen(argv[2]))
+        only_name = argv[2];
+
+    printf("# calls jit func makes: %ld\n", NUM_CALLS);
+    printf("addr of helper_func0:   %p\n", helper_func0);
+
+#define JIT(n, rel, a) FuncJitTy n = (!only_name || strcmp(only_name, #n) == 0) ? jit_func(rel, a) : 0
+    JIT(abs_0, 0, (void*)0);
+    JIT(abs_1M, 0,  (void*)(1*1024*1024));
+    JIT(abs_1G, 0,  (void*)(1*1024*1024*1024));
+    JIT(abs_near, 0,  (void*)near1);
+
+#if __amd64__
+    JIT(abs_8G, 0,  (void*)(8*1024l*1024l*1024l));
+#endif
+
+#if __aarch64__
+    JIT(abs_outside150M, 0, (void*)outside1);
+    JIT(abs_outside300M, 0, (void*)outside2);
+    JIT(abs_outside600M, 0, (void*)outside3);
+#endif
+
+    JIT(rel_near, 1 /* bl */, only_name ? (void*)near1 : (void*)near2);
+#if __amd64__
+    JIT(rel_far, 1 /* bl */, (void*)far);
+#endif
+
+#define BENCH(n) if (!only_name || strcmp(only_name, #n) == 0) bench(#n, n)
+
+    for (int i=0; i<2; ++i) {
+        printf("RUN %d:\n", i);
+        printf("%25s %20s %20s %s\n", "name", "jit code addr", "addr diff in MB", "time");
+        BENCH(abs_0);
+        BENCH(abs_1M);
+        BENCH(abs_1G);
+#if __amd64__
+        BENCH(abs_8G);
+#endif
+
+#if __aarch64__
+        BENCH(abs_outside150M);
+        BENCH(abs_outside300M);
+        BENCH(abs_outside600M);
+#endif
+        BENCH(abs_near);
+
+        BENCH(rel_near);
+#if __amd64__
+        BENCH(rel_far);
+#endif
+        printf("\n");
+    }
+
+
+    return 0;
+}
+
+
