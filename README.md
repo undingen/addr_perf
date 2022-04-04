@@ -10,35 +10,36 @@ It seems like the address difference between two functions is the cause.
 On my Intel Alder Lake it seems if the address difference is 2/4GB it will be fast else slow.
 
 I could reproduce this behaviour on the intel cpu but also on 3 different ARM64 cpus (Graviton2, RPi4, M1 Pro)
-but the the bahaviour is everywhere a bit different.
+but the the bahaviour is everywhere a bit different. And the number of times the JIT calls the helper_funcs
+seems to make a huge difference.
 
 I wrote a small example which helped me confirm it:
-- it JIT compiles a function which calls C functions ('helper_func*')
-- helper functions verifies that in the first argument it's address is passed
--- this makes sure that the relative and absolute instructions have to execute same number of instructions.
-- all the JIT funcs called 'abs_*' use an absolute call instruction:
--- amd64: 'call rdi'
--- arm64: 'blr x0'
-- all the JIT funcs called 'rel_*' use a IP relative call instruction:
--- amd64: 'call <helper_func>' can only address +-2GB
--- arm64: 'bl <helper_func>'   can only address +-128MB
-- I over aligned all the code to make sure I'm not just measuring some alignment issues
-- ARM64 version uses exact same number of instructions for rel and abs versions.
-- Test programs runs all version twice to confirm perf difference stays the same between runs.
-- 'jit code addr' is the addr the code got compiled to
-- 'addr of helper_func0' is the addr of the C function which get's called from the JIT code
-- 'addr diff in MB' is the difference in MB between the JITs compiled code addr and the helper func
-- 'calls jit func makes' how many times should the JIT func call helper_func per? (default 5000)
-- mmap allows to pass an address hint if the hint is 0 the kernel decides what to use
--- this is mostly an address which is far away from 'helper_func'
--- this is example: "abs_0"
+* it JIT compiles a function which calls C functions ('helper_func*')
+* helper functions verifies that in the first argument it's address is passed
+* this makes sure that the relative and absolute instructions have to execute same number of instructions.
+* all the JIT funcs called 'abs_*' use an absolute call instruction:
+  1. amd64: `call rdi`
+  2. arm64: `blr x0`
+* all the JIT funcs called 'rel_*' use a IP relative call instruction:
+   amd64: `call <helper_func>` can only address +-2GB
+   arm64: `bl <helper_func>`   can only address +-128MB
+* I over aligned all the code to make sure I'm not just measuring some alignment issues
+* ARM64 version uses exact same number of instructions for rel and abs versions.
+* Test programs runs all version twice to confirm perf difference stays the same between runs.
+* 'jit code addr' is the addr the code got compiled to
+* 'addr of helper_func0' is the addr of the C function which get's called from the JIT code
+* 'addr diff in MB' is the difference in MB between the JITs compiled code addr and the helper func
+* 'calls jit func makes' how many times should the JIT func call helper_func per? (default 5000)
+* `mmap()` allows to pass an address hint if the hint is 0 the kernel decides what to use
+  1. this is mostly an address which is far away from 'helper_func'
+  2. this is example: "abs_0"
 - for all the other examples we specify a hint
 
 
-Investigation via 'perf record' shows a huge difference in branch-misses but also L1-icache-loads, iTLB-load-misses, iTLB-loads on
+Investigation via 'perf record' shows a huge difference in `branch-misses` but also `L1-icache-loads`, `iTLB-load-misses`, `iTLB-loads` on
 some CPUs which report this counts.
 
-## Intel i9-12900K - Alder Lake (running on the perf cores)
+## Intel i9-12900K - Alder Lake (running on the performance cores)
        calls jit func makes: 5000
        addr of helper_func0:   0x5601480697f0
        jit code size: 160037
